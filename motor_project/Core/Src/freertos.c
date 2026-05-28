@@ -73,11 +73,12 @@ uint8_t rx_index = 0;
 volatile uint8_t uart_msg_ready = 0;   // 완성된 문장이 있으면 1
 char             uart_parse_buf[30];   // ISR이 복사해 둔 완성 문자열
 /* USER CODE END Variables */
+
 /* Definitions for MotorTask */
 osThreadId_t MotorTaskHandle;
 const osThreadAttr_t MotorTask_attributes = {
   .name = "MotorTask",
-  .stack_size = 128 * 4,
+  .stack_size = 512 * 4,          // [FIX] sscanf 스택 사용 대비 256으로 증가
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for KeypadTask */
@@ -101,13 +102,8 @@ uint16_t Scan_Keypad(void);
 void StartDefaultTask(void *argument);
 void StartTask02(void *argument);
 
-void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+void MX_FREERTOS_Init(void);
 
-/**
-  * @brief  FreeRTOS initialization
-  * @param  None
-  * @retval None
-  */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
@@ -122,26 +118,19 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_TIMERS */
   /* USER CODE END RTOS_TIMERS */
 
-  /* Create the queue(s) */
-  /* creation of KeyQueue */
-  KeyQueueHandle = osMessageQueueNew (16, sizeof(TurretMsg_t), &KeyQueue_attributes);
+  KeyQueueHandle = osMessageQueueNew(16, sizeof(TurretMsg_t), &KeyQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* USER CODE END RTOS_QUEUES */
 
-  /* Create the thread(s) */
-  /* creation of MotorTask */
-  MotorTaskHandle = osThreadNew(StartDefaultTask, NULL, &MotorTask_attributes);
-
-  /* creation of KeypadTask */
-  KeypadTaskHandle = osThreadNew(StartTask02, NULL, &KeypadTask_attributes);
+  MotorTaskHandle  = osThreadNew(StartDefaultTask, NULL, &MotorTask_attributes);
+  KeypadTaskHandle = osThreadNew(StartTask02,      NULL, &KeypadTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
   /* USER CODE END RTOS_EVENTS */
-
 }
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -158,17 +147,18 @@ void StartDefaultTask(void *argument)
   uint16_t pulse_y = 1500;
 
   const uint16_t step_size  = 16;
-  // 1. [FIX] P-Gain 대폭 감소 (부드러운 추적을 위해 0.03 ~ 0.05 추천)
-  const float    Kp_x       = 0.03f;
-  const float    Kp_y       = 0.03f;
 
-  // 2. [FIX] 속도 제한 및 데드존 추가
-  const int      max_speed  = 10;    // 한 사이클당 모터가 움직일 수 있는 최대 PWM 변화량
-  const int      deadzone   = 20;   // 오차가 20픽셀 이내면 중앙에 왔다고 판단하고 정지
+  // ── [변경] 제어 상수 및 안전장치 값 세팅 ──────────────────
+  const float    Kp_x       = 0.03f;    // P-Gain 낮춤 (기존 0.3)
+  const float    Kp_y       = 0.03f;    // P-Gain 낮춤 (기존 0.3)
+  const int      max_speed  = 7;        // 한 프레임당 최대 이동 보폭 제한 (확 도는 것 방지)
+  const int      deadzone   = 20;       // 데드존 확장을 통해 중앙 유령 진동 방지
+  // ─────────────────────────────────────────────────────────
 
   const uint16_t max_pulse  = 2400;
   const uint16_t min_pulse  = 600;
-  uint8_t current_mode = TYPE_MANUAL;   // [FIX] 초기값: 수동 모드로 시작하여 테스트 용이
+
+  uint8_t current_mode = TYPE_MANUAL;   // 초기값: 수동 모드로 시작
 
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
@@ -224,43 +214,36 @@ void StartDefaultTask(void *argument)
                 if(rx_msg.manual_cmd & CMD_DOWN)  pulse_y += step_size;
             }
         }
-        // 3. 자동 모드 동작
-        else if(current_mode == TYPE_AUTO)
-        {
-        	if(rx_msg.msg_type == TYPE_AUTO)
-        	            {
-        	                // 데드존 처리 (설정한 deadzone 픽셀 이내 오차는 무시)
-        	                if(rx_msg.error_x > -deadzone && rx_msg.error_x < deadzone) rx_msg.error_x = 0;
-        	                if(rx_msg.error_y > -deadzone && rx_msg.error_y < deadzone) rx_msg.error_y = 0;
+        // 3. 자동 모드 동작 (속도 제한 및 데드존 반영)
+                else if(current_mode == TYPE_AUTO)
+                {
+                    if(rx_msg.msg_type == TYPE_AUTO)
+                    {
+                        // 데드존 처리 (설정한 deadzone 픽셀 이내 오차는 무시)
+                        if(rx_msg.error_x > -deadzone && rx_msg.error_x < deadzone) rx_msg.error_x = 0;
+                        if(rx_msg.error_y > -deadzone && rx_msg.error_y < deadzone) rx_msg.error_y = 0;
 
-        	                if(rx_msg.error_x == 0 && rx_msg.error_y == 0)
-        	                    HAL_GPIO_WritePin(LASER_LED_GPIO_Port, LASER_LED_Pin, GPIO_PIN_SET);
-        	                else
-        	                    HAL_GPIO_WritePin(LASER_LED_GPIO_Port, LASER_LED_Pin, GPIO_PIN_RESET);
+                        // 비례 제어 이동량 계산 (오차 * 게인)
+                        int delta_x = (int)(rx_msg.error_x * Kp_x);
+                        int delta_y = (int)(rx_msg.error_y * Kp_y);
 
-        	                // 비례 제어 이동량 계산 (오차 * 게인)
-        	                int delta_x = (int)(rx_msg.error_x * Kp_x);
-        	                int delta_y = (int)(rx_msg.error_y * Kp_y);
+                        // 🚨 한 번에 과도하게 회전하는 것을 막는 스피드 리미터
+                        if(delta_x > max_speed)  delta_x = max_speed;
+                        if(delta_x < -max_speed) delta_x = -max_speed;
+                        if(delta_y > max_speed)  delta_y = max_speed;
+                        if(delta_y < -max_speed) delta_y = -max_speed;
 
-        	                // 🚨 한 번에 과도하게 회전하는 것을 막는 스피드 리미터
-        	                if(delta_x > max_speed)  delta_x = max_speed;
-        	                if(delta_x < -max_speed) delta_x = -max_speed;
-        	                if(delta_y > max_speed)  delta_y = max_speed;
-        	                if(delta_y < -max_speed) delta_y = -max_speed;
-
-        	                // 현재 각도 파동에 보폭 합산
-        	                pulse_x = (uint16_t)((int)pulse_x + delta_x);
-        	                pulse_y = (uint16_t)((int)pulse_y - delta_y);
-        	            }
-        	            else
-        	            {
-        	                // 자동 모드 상태인데 유효한 오차 값이 안 들어오면 중앙 대기
-        	                pulse_x = 1500;
-        	                pulse_y = 1500;
-        	                HAL_GPIO_WritePin(LASER_LED_GPIO_Port, LASER_LED_Pin, GPIO_PIN_RESET);
-        	            }
-        }
-
+                        // 현재 각도 파동에 보폭 합산
+                        pulse_x = (uint16_t)((int)pulse_x + delta_x);
+                        pulse_y = (uint16_t)((int)pulse_y - delta_y);
+                    }
+                    else
+                    {
+                        // 자동 모드 상태인데 유효한 오차 값이 안 들어오면 중앙 대기
+                        pulse_x = 1500;
+                        pulse_y = 1500;
+                    }
+                }
 
         // 소프트 리미트
         if(pulse_x > max_pulse) pulse_x = max_pulse;
@@ -352,4 +335,3 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 /* USER CODE END Application */
-
