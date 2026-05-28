@@ -1,0 +1,14 @@
+# STM32 빌드 결과물 무시
+Debug/
+Release/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.su
+
+# OS 관련 임시 파일 무시
+.DS_Store
+Thumbs.db
