@@ -68,7 +68,7 @@ uint8_t rx_byte;
 char    rx_buffer[30];
 uint8_t rx_index = 0;
 
-// [FIX] ISR → Task 데이터 전달용 변수
+// ISR → Task 데이터 전달용 변수
 // ISR에서는 플래그만 세우고, sscanf는 MotorTask에서 처리
 volatile uint8_t uart_msg_ready = 0;   // 완성된 문장이 있으면 1
 char             uart_parse_buf[30];   // ISR이 복사해 둔 완성 문자열
@@ -78,7 +78,7 @@ char             uart_parse_buf[30];   // ISR이 복사해 둔 완성 문자열
 osThreadId_t MotorTaskHandle;
 const osThreadAttr_t MotorTask_attributes = {
   .name = "MotorTask",
-  .stack_size = 512 * 4,          // [FIX] sscanf 스택 사용 대비 256으로 증가
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for KeypadTask */
@@ -146,33 +146,26 @@ void StartDefaultTask(void *argument)
   uint16_t pulse_x = 1500;
   uint16_t pulse_y = 1500;
 
-  const uint16_t step_size  = 16;
+  const uint16_t step_size = 16;
 
-  // ── [변경] 제어 상수 및 안전장치 값 세팅 ──────────────────
-  const float    Kp_x       = 0.08f;
-  const float    Kp_y       = 0.08f;
-
-  // PD제어 D항(오차 변화율, 가까워질수록 브레이크 기능)
-  const float	Kd_x = 0.25f;
-  const float	Kd_y = 0.25f;
-
-  const float  K_sq_x     = 0.003f;  //비선형 제곱 게인 (멀수록 폭발적 가속)
-  const float  K_sq_y     = 0.003f;
-
-  const int      max_speed  = 40;
-  const int      deadzone   = 10; // 서보 버징 방지
+  // ── 제어 상수 ────────────────────────────────────────────
+  const float Kp_x      = 0.08f;
+  const float Kp_y      = 0.08f;
+  const float Kd_x      = 0.25f;   // D항: 브레이크 강도
+  const float Kd_y      = 0.25f;   // 진동 있으면 올리고, 굳으면 낮추기
+  const int   max_speed = 15;
+  const int   deadzone  = 10;      // 서보 버징 방지
+  const float max_pulse = 2300.0f;
+  const float min_pulse =  700.0f;
   // ─────────────────────────────────────────────────────────
 
-  const float max_pulse = 2300.0f;
-  const float min_pulse = 700.0f;
-
-  // D항 계산용
+  // D항 계산용 이전 오차 + float 펄스 누적
   float prev_error_x = 0.0f;
   float prev_error_y = 0.0f;
-  float pulse_x_f = 1500.0f;
-  float pulse_y_f = 1500.0f;
+  float pulse_x_f    = 1500.0f;
+  float pulse_y_f    = 1500.0f;
 
-  uint8_t current_mode = TYPE_MANUAL;   // 초기값: 수동 모드로 시작
+  uint8_t current_mode = TYPE_MANUAL;
 
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
@@ -180,18 +173,14 @@ void StartDefaultTask(void *argument)
   TIM3->CCR1 = pulse_x;
   TIM3->CCR2 = pulse_y;
 
-  // UART 수신 인터럽트 시작
   HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
 
   for(;;)
   {
-    // -------------------------------------------------------
-    // [FIX] UART 파싱을 태스크(여기)에서 처리
-    //       ISR에서 sscanf를 쓰면 HardFault 발생 → 플래그 방식으로 변경
-    // -------------------------------------------------------
+    // ── UART 파싱 (ISR에서 sscanf 금지 → 태스크에서 처리) ──
     if(uart_msg_ready)
     {
-        uart_msg_ready = 0;                   // 플래그 즉시 클리어
+        uart_msg_ready = 0;
 
         int err_x = 0, err_y = 0;
         if(sscanf(uart_parse_buf, "%d,%d", &err_x, &err_y) == 2)
@@ -205,21 +194,16 @@ void StartDefaultTask(void *argument)
         }
     }
 
-    // -------------------------------------------------------
-    // [FIX] osWaitForever → 타임아웃 10ms
-    //       osWaitForever는 UART 플래그를 폴링할 기회를 없앰
-    // -------------------------------------------------------
     if(osMessageQueueGet(KeyQueueHandle, &rx_msg, NULL, 10) == osOK)
     {
-        // 1. 모드 전환 (1번 버튼)
+        // ── 모드 전환 (TOGGLE 버튼) ──────────────────────────
         if(rx_msg.msg_type == TYPE_MANUAL && (rx_msg.manual_cmd & CMD_TOGGLE))
         {
             current_mode = (current_mode == TYPE_AUTO) ? TYPE_MANUAL : TYPE_AUTO;
-            // 모드 전환 시 LED off
-            HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
         }
 
-        // 2. 수동 모드 동작
+        // ── 수동 모드 ─────────────────────────────────────────
         if(current_mode == TYPE_MANUAL)
         {
             if(rx_msg.msg_type == TYPE_MANUAL)
@@ -228,83 +212,78 @@ void StartDefaultTask(void *argument)
                 if(rx_msg.manual_cmd & CMD_RIGHT) pulse_x += step_size;
                 if(rx_msg.manual_cmd & CMD_UP)    pulse_y -= step_size;
                 if(rx_msg.manual_cmd & CMD_DOWN)  pulse_y += step_size;
+
+                // [FIX] 수동 소프트 리미트 + CCR 반영
+                if(pulse_x > (uint16_t)max_pulse) pulse_x = (uint16_t)max_pulse;
+                if(pulse_x < (uint16_t)min_pulse) pulse_x = (uint16_t)min_pulse;
+                if(pulse_y > (uint16_t)max_pulse) pulse_y = (uint16_t)max_pulse;
+                if(pulse_y < (uint16_t)min_pulse) pulse_y = (uint16_t)min_pulse;
+
+                TIM3->CCR1 = pulse_x;
+                TIM3->CCR2 = pulse_y;
             }
         }
-        // 3. 자동 모드 동작 (속도 제한 및 데드존 반영)
-                else if(current_mode == TYPE_AUTO)
-                {
-                    if(rx_msg.msg_type == TYPE_AUTO)
-                    {
-                        // 데드존 처리 (설정한 deadzone 픽셀 이내 오차는 무시)
-                        if(rx_msg.error_x > -deadzone && rx_msg.error_x < deadzone) rx_msg.error_x = 0;
-                        if(rx_msg.error_y > -deadzone && rx_msg.error_y < deadzone) rx_msg.error_y = 0;
 
-                        // 데드존 진입 판전 LED 전원키기 > 나중에 레이저포인터로 변경예정
-                        if(rx_msg.error_x==0 && rx_msg.error_y ==0)
-                        	HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_RESET);
-                        else
-                        	HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
+        // ── 자동 모드 (PD 제어) ───────────────────────────────
+        else if(current_mode == TYPE_AUTO)
+        {
+            if(rx_msg.msg_type == TYPE_AUTO)
+            {
+                float ex = (float)rx_msg.error_x;
+                float ey = (float)rx_msg.error_y;
 
-                        float ex = (float)rx_msg.error_x;
-                        float ey = (float)rx_msg.error_y;
+                // [FIX 버그2/3] ex/ey 복사 후 데드존 처리 (중복 제거)
+                //              prev_error 비교도 데드존 적용된 값으로 일관성 유지
+                if(ex > -(float)deadzone && ex < (float)deadzone) ex = 0.0f;
+                if(ey > -(float)deadzone && ey < (float)deadzone) ey = 0.0f;
 
-                        // ── 비선형 PD 제어 ──────────────────────────────
-                        // P항:  선형 (방향 유지)
-                        // P²항: 오차 제곱 (멀수록 폭발적, 가까울수록 급감)
-                        // D항:  미분 브레이크 (오버슈트 억제)
+                // LED 락온 판정 (나중에 레이저 포인터로 변경 예정)
+                if(ex == 0.0f && ey == 0.0f)
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET);
+                else
+                    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
 
-                        float sign_x = (ex >= 0) ? 1.0f : -1.0f;
-                        float sign_y = (ey >= 0) ? 1.0f : -1.0f;
+                // ── PD 제어 ────────────────────────────────────
+                // P항: 오차에 비례 (멀수록 빠름)
+                // D항: 오차 변화율 (줄어드는 중이면 자동 감속 → 오버슈트 억제)
+                float delta_x = Kp_x * ex + Kd_x * (ex - prev_error_x);
+                float delta_y = Kp_y * ey + Kd_y * (ey - prev_error_y);
 
-                        float delta_x = Kp_x  * ex                      // 선형항
-                                      + K_sq_x * sign_x * (ex * ex)     // 비선형항
-                                      + Kd_x  * (ex - prev_error_x);    // 브레이크항
+                prev_error_x = ex;
+                prev_error_y = ey;
 
-                        float delta_y = Kp_y  * ey
-                                      + K_sq_y * sign_y * (ey * ey)
-                                      + Kd_y  * (ey - prev_error_y);
+                // 스피드 리미터
+                if(delta_x >  (float)max_speed) delta_x =  (float)max_speed;
+                if(delta_x < -(float)max_speed) delta_x = -(float)max_speed;
+                if(delta_y >  (float)max_speed) delta_y =  (float)max_speed;
+                if(delta_y < -(float)max_speed) delta_y = -(float)max_speed;
 
+                // float 누적
+                pulse_x_f += delta_x;
+                pulse_y_f -= delta_y;
 
-                        prev_error_x = ex;
-                        prev_error_y = ey;
+                // [FIX 버그1] 소프트 리미트를 pulse_x_f 기준으로 통일
+                if(pulse_x_f > max_pulse) pulse_x_f = max_pulse;
+                if(pulse_x_f < min_pulse) pulse_x_f = min_pulse;
+                if(pulse_y_f > max_pulse) pulse_y_f = max_pulse;
+                if(pulse_y_f < min_pulse) pulse_y_f = min_pulse;
 
-                        // 🚨 한 번에 과도하게 회전하는 것을 막는 스피드 리미터
-                        if(delta_x > (float)max_speed)  delta_x = (float)max_speed;
-                        if(delta_x < -(float)max_speed) delta_x = -(float)max_speed;
-                        if(delta_y > (float)max_speed)  delta_y = (float)max_speed;
-                        if(delta_y < -(float)max_speed) delta_y = -(float)max_speed;
+                TIM3->CCR1 = (uint16_t)pulse_x_f;
+                TIM3->CCR2 = (uint16_t)pulse_y_f;
+            }
+            else
+            {
+                // 물체 없음 → 중앙 대기 + 전체 리셋
+                pulse_x_f    = 1500.0f;
+                pulse_y_f    = 1500.0f;
+                prev_error_x = 0.0f;
+                prev_error_y = 0.0f;
+                HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
 
-                        // float 누적 후 레지스터 반영
-                        pulse_x_f += delta_x;
-                        pulse_y_f -= delta_y;
-
-                        pulse_x = (uint16_t)pulse_x_f;
-                        pulse_y = (uint16_t)pulse_y_f;
-                    }
-                    else
-                    {
-                        // 자동 모드 상태인데 유효한 오차 값이 안 들어오면 중앙 대기
-                        pulse_x_f = 1500.0f;
-                        pulse_y_f = 1500.0f;
-
-                        pulse_x = 1500;
-                        pulse_y = 1500;
-
-                        prev_error_x = 0.0f;
-                        prev_error_y = 0.0f;
-
-                        HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
-                    }
-                }
-
-        // 소프트 리미트
-        if(pulse_x > max_pulse) pulse_x = max_pulse;
-        if(pulse_x < min_pulse) pulse_x = min_pulse;
-        if(pulse_y > max_pulse) pulse_y = max_pulse;
-        if(pulse_y < min_pulse) pulse_y = min_pulse;
-
-        TIM3->CCR1 = (uint16_t)pulse_x_f;
-        TIM3->CCR2 = (uint16_t)pulse_y_f;
+                TIM3->CCR1 = 1500;
+                TIM3->CCR2 = 1500;
+            }
+        }
     }
   }
   /* USER CODE END StartDefaultTask */
@@ -352,15 +331,13 @@ void StartTask02(void *argument)
 /**
   * @brief UART 수신 완료 콜백 (ISR 컨텍스트)
   *
-  * [FIX] sscanf는 내부적으로 힙(malloc)을 사용하므로 ISR에서 호출 시 HardFault 발생.
-  *       ISR에서는 버퍼에 글자를 쌓고, 문장이 완성되면 uart_parse_buf에 복사 후
-  *       uart_msg_ready 플래그만 1로 세운다. 실제 sscanf 파싱은 MotorTask에서 수행.
+  * ISR에서는 버퍼에 글자를 쌓고, 문장이 완성되면 uart_parse_buf에 복사 후
+  * uart_msg_ready 플래그만 1로 세운다. 실제 sscanf 파싱은 MotorTask에서 수행.
   */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if(huart->Instance == USART2)
     {
-        // 생존 신고: 수신마다 LED 토글
         HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
 
         if(rx_byte == '\n' || rx_byte == '\r')
@@ -368,11 +345,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             if(rx_index > 0)
             {
                 rx_buffer[rx_index] = '\0';
-
-                // [FIX] sscanf 제거 → 버퍼만 복사 후 플래그 세팅
                 memcpy(uart_parse_buf, rx_buffer, rx_index + 1);
                 uart_msg_ready = 1;
-
                 rx_index = 0;
             }
         }
@@ -382,7 +356,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 rx_buffer[rx_index++] = rx_byte;
         }
 
-        // 다음 바이트 수신 대기 재등록
         HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
     }
 }
