@@ -151,7 +151,7 @@ void StartDefaultTask(void *argument)
   // ── [변경] 제어 상수 및 안전장치 값 세팅 ──────────────────
   const float    Kp_x       = 0.15f;
     const float    Kp_y       = 0.15f;
-    const int      max_speed  = 20;
+    const int      max_speed  = 12;
     const int      deadzone   = 12; // 서보 버징 방지
   // ─────────────────────────────────────────────────────────
 
