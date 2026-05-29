@@ -149,10 +149,10 @@ void StartDefaultTask(void *argument)
   const uint16_t step_size  = 16;
 
   // ── [변경] 제어 상수 및 안전장치 값 세팅 ──────────────────
-  const float    Kp_x       = 0.03f;    // P-Gain 낮춤 (기존 0.3)
-  const float    Kp_y       = 0.03f;    // P-Gain 낮춤 (기존 0.3)
-  const int      max_speed  = 7;        // 한 프레임당 최대 이동 보폭 제한 (확 도는 것 방지)
-  const int      deadzone   = 20;       // 데드존 확장을 통해 중앙 유령 진동 방지
+  const float    Kp_x       = 0.15f;
+    const float    Kp_y       = 0.15f;
+    const int      max_speed  = 20;
+    const int      deadzone   = 8;
   // ─────────────────────────────────────────────────────────
 
   const uint16_t max_pulse  = 2400;
