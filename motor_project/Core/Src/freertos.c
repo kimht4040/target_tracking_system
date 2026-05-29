@@ -152,11 +152,11 @@ void StartDefaultTask(void *argument)
   const float    Kp_x       = 0.15f;
     const float    Kp_y       = 0.15f;
     const int      max_speed  = 20;
-    const int      deadzone   = 8;
+    const int      deadzone   = 12; // 서보 버징 방지
   // ─────────────────────────────────────────────────────────
 
-  const uint16_t max_pulse  = 2400;
-  const uint16_t min_pulse  = 600;
+  const uint16_t max_pulse  = 2300;
+  const uint16_t min_pulse  = 700;
 
   uint8_t current_mode = TYPE_MANUAL;   // 초기값: 수동 모드로 시작
 
@@ -201,6 +201,8 @@ void StartDefaultTask(void *argument)
         if(rx_msg.msg_type == TYPE_MANUAL && (rx_msg.manual_cmd & CMD_TOGGLE))
         {
             current_mode = (current_mode == TYPE_AUTO) ? TYPE_MANUAL : TYPE_AUTO;
+            // 모드 전환 시 LED off
+            HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
         }
 
         // 2. 수동 모드 동작
@@ -223,6 +225,12 @@ void StartDefaultTask(void *argument)
                         if(rx_msg.error_x > -deadzone && rx_msg.error_x < deadzone) rx_msg.error_x = 0;
                         if(rx_msg.error_y > -deadzone && rx_msg.error_y < deadzone) rx_msg.error_y = 0;
 
+                        // 데드존 진입 판전 LED 전원키기 > 나중에 레이저포인터로 변경예정
+                        if(rx_msg.error_x==0 && rx_msg.error_y ==0)
+                        	HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_RESET);
+                        else
+                        	HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
+
                         // 비례 제어 이동량 계산 (오차 * 게인)
                         int delta_x = (int)(rx_msg.error_x * Kp_x);
                         int delta_y = (int)(rx_msg.error_y * Kp_y);
@@ -242,6 +250,7 @@ void StartDefaultTask(void *argument)
                         // 자동 모드 상태인데 유효한 오차 값이 안 들어오면 중앙 대기
                         pulse_x = 1500;
                         pulse_y = 1500;
+                        HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
                     }
                 }
 
