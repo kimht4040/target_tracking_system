@@ -149,14 +149,28 @@ void StartDefaultTask(void *argument)
   const uint16_t step_size  = 16;
 
   // ── [변경] 제어 상수 및 안전장치 값 세팅 ──────────────────
-  const float    Kp_x       = 0.15f;
-    const float    Kp_y       = 0.15f;
-    const int      max_speed  = 12;
-    const int      deadzone   = 12; // 서보 버징 방지
+  const float    Kp_x       = 0.08f;
+  const float    Kp_y       = 0.08f;
+
+  // PD제어 D항(오차 변화율, 가까워질수록 브레이크 기능)
+  const float	Kd_x = 0.25f;
+  const float	Kd_y = 0.25f;
+
+  const float  K_sq_x     = 0.003f;  //비선형 제곱 게인 (멀수록 폭발적 가속)
+  const float  K_sq_y     = 0.003f;
+
+  const int      max_speed  = 40;
+  const int      deadzone   = 10; // 서보 버징 방지
   // ─────────────────────────────────────────────────────────
 
-  const uint16_t max_pulse  = 2300;
-  const uint16_t min_pulse  = 700;
+  const float max_pulse = 2300.0f;
+  const float min_pulse = 700.0f;
+
+  // D항 계산용
+  float prev_error_x = 0.0f;
+  float prev_error_y = 0.0f;
+  float pulse_x_f = 1500.0f;
+  float pulse_y_f = 1500.0f;
 
   uint8_t current_mode = TYPE_MANUAL;   // 초기값: 수동 모드로 시작
 
@@ -231,25 +245,54 @@ void StartDefaultTask(void *argument)
                         else
                         	HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
 
-                        // 비례 제어 이동량 계산 (오차 * 게인)
-                        int delta_x = (int)(rx_msg.error_x * Kp_x);
-                        int delta_y = (int)(rx_msg.error_y * Kp_y);
+                        float ex = (float)rx_msg.error_x;
+                        float ey = (float)rx_msg.error_y;
+
+                        // ── 비선형 PD 제어 ──────────────────────────────
+                        // P항:  선형 (방향 유지)
+                        // P²항: 오차 제곱 (멀수록 폭발적, 가까울수록 급감)
+                        // D항:  미분 브레이크 (오버슈트 억제)
+
+                        float sign_x = (ex >= 0) ? 1.0f : -1.0f;
+                        float sign_y = (ey >= 0) ? 1.0f : -1.0f;
+
+                        float delta_x = Kp_x  * ex                      // 선형항
+                                      + K_sq_x * sign_x * (ex * ex)     // 비선형항
+                                      + Kd_x  * (ex - prev_error_x);    // 브레이크항
+
+                        float delta_y = Kp_y  * ey
+                                      + K_sq_y * sign_y * (ey * ey)
+                                      + Kd_y  * (ey - prev_error_y);
+
+
+                        prev_error_x = ex;
+                        prev_error_y = ey;
 
                         // 🚨 한 번에 과도하게 회전하는 것을 막는 스피드 리미터
-                        if(delta_x > max_speed)  delta_x = max_speed;
-                        if(delta_x < -max_speed) delta_x = -max_speed;
-                        if(delta_y > max_speed)  delta_y = max_speed;
-                        if(delta_y < -max_speed) delta_y = -max_speed;
+                        if(delta_x > (float)max_speed)  delta_x = (float)max_speed;
+                        if(delta_x < -(float)max_speed) delta_x = -(float)max_speed;
+                        if(delta_y > (float)max_speed)  delta_y = (float)max_speed;
+                        if(delta_y < -(float)max_speed) delta_y = -(float)max_speed;
 
-                        // 현재 각도 파동에 보폭 합산
-                        pulse_x = (uint16_t)((int)pulse_x + delta_x);
-                        pulse_y = (uint16_t)((int)pulse_y - delta_y);
+                        // float 누적 후 레지스터 반영
+                        pulse_x_f += delta_x;
+                        pulse_y_f -= delta_y;
+
+                        pulse_x = (uint16_t)pulse_x_f;
+                        pulse_y = (uint16_t)pulse_y_f;
                     }
                     else
                     {
                         // 자동 모드 상태인데 유효한 오차 값이 안 들어오면 중앙 대기
+                        pulse_x_f = 1500.0f;
+                        pulse_y_f = 1500.0f;
+
                         pulse_x = 1500;
                         pulse_y = 1500;
+
+                        prev_error_x = 0.0f;
+                        prev_error_y = 0.0f;
+
                         HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
                     }
                 }
@@ -260,8 +303,8 @@ void StartDefaultTask(void *argument)
         if(pulse_y > max_pulse) pulse_y = max_pulse;
         if(pulse_y < min_pulse) pulse_y = min_pulse;
 
-        TIM3->CCR1 = pulse_x;
-        TIM3->CCR2 = pulse_y;
+        TIM3->CCR1 = (uint16_t)pulse_x_f;
+        TIM3->CCR2 = (uint16_t)pulse_y_f;
     }
   }
   /* USER CODE END StartDefaultTask */
