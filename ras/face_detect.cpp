@@ -1,5 +1,5 @@
 /*
- * rect_detect.cpp — 빨간 사각형 인식 + 칼만 필터
+ * face_detect.cpp — 노란 공 인식 + 칼만 필터
  * 빌드: make  /  실행: make run
  * 종료: Q 또는 ESC
  */
@@ -19,19 +19,18 @@
 
 static constexpr int CAM_W = 640; // USB 웹캠 속도 우선: 필요하면 640으로 복구
 static constexpr int CAM_H = 480; // USB 웹캠 속도 우선: 필요하면 480으로 복구
-static constexpr int CAM_FPS = 30;
+static constexpr int CAM_FPS = 60;
 static constexpr int USB_CAMERA_INDEX = -1;      // USB 웹캠 번호: -1은 자동 검색, /dev/video1 고정이면 1
-static constexpr float PROCESS_SCALE = 0.5f;     // 빨간 마스크 처리 배율: 낮추면 빠름, 너무 낮추면 검출력 감소
+static constexpr float PROCESS_SCALE = 0.5f;     // 노란 마스크 처리 배율: 낮추면 빠름, 너무 낮추면 검출력 감소
 static constexpr int DETECT_INTERVAL_FRAMES = 1; // 검출 주기: 1은 매 프레임, 2는 한 프레임 건너뛰며 속도 개선
 static constexpr int PRINT_INTERVAL_FRAMES = 10; // 터미널 출력 주기: UART 전송은 매 프레임 유지
 static constexpr float UART_OUTPUT_SCALE = 1.0f; // UART 전송값 배율: 테스트 후 0.5f 등으로 조정
-static constexpr bool SHOW_DEBUG_MASK = true;    // true로 바꾸면 빨간색 검출 마스크 화면 표시
-static constexpr double MIN_RECT_AREA = 80.0;    // 너무 작은 빨간 잡음 제거
-static constexpr double MIN_RECT_FILL = 0.45;    // 사각형 채움 비율: 낮추면 일부 가려진 사각형도 허용
-static const cv::Scalar RED_LO1(0, 120, 80);     // 빡센 빨강 HSV 범위: 채도/밝기 낮은 색 제외
-static const cv::Scalar RED_HI1(8, 255, 255);
-static const cv::Scalar RED_LO2(172, 120, 80);   // 빨강 HSV 하한 2: 180도 근처
-static const cv::Scalar RED_HI2(180, 255, 255);
+static constexpr double FPS_SMOOTHING = 0.90;    // 화면 FPS 표시 안정화 계수
+static constexpr bool SHOW_DEBUG_MASK = true;    // true로 바꾸면 노란색 검출 마스크 화면 표시
+static constexpr double MIN_RECT_AREA = 80.0;    // 너무 작은 노란 잡음 제거
+static constexpr double MIN_RECT_FILL = 0.45;    // 채움 비율: 낮추면 일부 가려진 공도 허용
+static const cv::Scalar YELLOW_LO(18, 120, 150); // RGB(235,192,72) ~= HSV(22,177,235)
+static const cv::Scalar YELLOW_HI(27, 255, 255);
 
 // ── 칼만 필터 ────────────────────────────────
 // 상태 [cx, cy, vx, vy] / 측정 [cx, cy]
@@ -42,8 +41,8 @@ public:
     {
         kf_.transitionMatrix = (cv::Mat_<float>(4, 4) << 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1);
         kf_.measurementMatrix = (cv::Mat_<float>(2, 4) << 1, 0, 0, 0, 0, 1, 0, 0);
-        cv::setIdentity(kf_.processNoiseCov, cv::Scalar(1e-2));    // Q 올림 → 움직임 변화에 더 빠르게 반응
-        cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(2.5)); // R 낮춤 → 검출 중심을 더 타이트하게 추종
+        cv::setIdentity(kf_.processNoiseCov, cv::Scalar(1e-2));  // Q 올림 → 움직임 변화에 더 빠르게 반응
+        cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(2)); // R 낮춤 → 검출 중심을 더 타이트하게 추종
         cv::setIdentity(kf_.errorCovPost, cv::Scalar(1.0));
         meas_ = cv::Mat::zeros(2, 1, CV_32F);
     }
@@ -235,21 +234,19 @@ private:
     bool hasFrame_ = false;
 };
 
-// ── 빨간 사각형 검출 ─────────────────────────
+// ── 노란 공 검출 ───────────────────────────
 struct RectTarget
 {
     cv::Point2f center;
     cv::Rect box;
 };
 
-bool findRedRectangle(const cv::Mat &frame, RectTarget &out)
+bool findYellowBall(const cv::Mat &frame, RectTarget &out)
 {
-    cv::Mat small, hsv, mask1, mask2, mask;
+    cv::Mat small, hsv, mask;
     cv::resize(frame, small, cv::Size(), PROCESS_SCALE, PROCESS_SCALE, cv::INTER_AREA);
     cv::cvtColor(small, hsv, cv::COLOR_BGR2HSV);
-    cv::inRange(hsv, RED_LO1, RED_HI1, mask1);
-    cv::inRange(hsv, RED_LO2, RED_HI2, mask2);
-    cv::bitwise_or(mask1, mask2, mask);
+    cv::inRange(hsv, YELLOW_LO, YELLOW_HI, mask);
 
     cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, {5, 5});
     cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);
@@ -304,6 +301,23 @@ bool findRedRectangle(const cv::Mat &frame, RectTarget &out)
     return true;
 }
 
+void drawFps(cv::Mat &frame, double fps)
+{
+    char text[32];
+    snprintf(text, sizeof(text), "FPS: %.1f", fps);
+
+    const int fontFace = cv::FONT_HERSHEY_SIMPLEX;
+    const double fontScale = 0.65;
+    const int thickness = 2;
+    int baseline = 0;
+    cv::Size textSize = cv::getTextSize(text, fontFace, fontScale, thickness, &baseline);
+    cv::Rect bg(8, 8, textSize.width + 18, textSize.height + baseline + 14);
+
+    cv::rectangle(frame, bg, cv::Scalar(0, 0, 0), cv::FILLED, cv::LINE_AA);
+    cv::putText(frame, text, {bg.x + 9, bg.y + 9 + textSize.height},
+                fontFace, fontScale, cv::Scalar(0, 255, 255), thickness, cv::LINE_AA);
+}
+
 // ── 메인 ─────────────────────────────────────
 int main()
 {
@@ -338,6 +352,8 @@ int main()
     int lostFrames = 0;
     int emptyFrames = 0;
     int frameCount = 0;
+    double displayFps = 0.0;
+    auto lastFrameTime = std::chrono::steady_clock::now();
 
     while (true)
     {
@@ -353,11 +369,22 @@ int main()
         emptyFrames = 0;
         frameCount++;
 
-        // 빨간색 마스크에서 사각형 객체 검출
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - lastFrameTime).count();
+        lastFrameTime = now;
+        if (elapsed > 0.0)
+        {
+            double instantFps = 1.0 / elapsed;
+            displayFps = (displayFps <= 0.0)
+                             ? instantFps
+                             : (displayFps * FPS_SMOOTHING + instantFps * (1.0 - FPS_SMOOTHING));
+        }
+
+        // 노란색 마스크에서 공 객체 검출
         RectTarget rect;
         cv::Point2f kpt;
         bool runDetection = (frameCount % DETECT_INTERVAL_FRAMES) == 0;
-        bool detected = runDetection && findRedRectangle(frame, rect);
+        bool detected = runDetection && findYellowBall(frame, rect);
 
         // 칼만 필터
         if (detected)
@@ -408,8 +435,9 @@ int main()
         // ── 화면 표시 ──
         if (detected)
         {
-            cv::rectangle(frame, rect.box, cv::Scalar(0, 200, 0), 2, cv::LINE_AA);
-            cv::drawMarker(frame, rect.center, cv::Scalar(0, 200, 0),
+            int radius = std::max(rect.box.width, rect.box.height) / 2;
+            cv::circle(frame, rect.center, radius, cv::Scalar(72, 192, 235), 2, cv::LINE_AA);
+            cv::drawMarker(frame, rect.center, cv::Scalar(72, 192, 235),
                            cv::MARKER_CROSS, 10, 1, cv::LINE_AA);
         }
 
@@ -427,6 +455,7 @@ int main()
         cv::drawMarker(frame, screen_center, cv::Scalar(200, 200, 200),
                        cv::MARKER_CROSS, 20, 1, cv::LINE_AA);
 
+        drawFps(frame, displayFps);
         cv::imshow("Tracking", frame);
         if ((cv::waitKey(1) & 0xFF) == 'q')
             break;
