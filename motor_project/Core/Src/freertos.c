@@ -64,6 +64,7 @@ extern TIM_HandleTypeDef htim3;
 extern UART_HandleTypeDef huart2;
 
 // UART 수신 버퍼
+
 uint8_t rx_byte;
 char    rx_buffer[30];
 uint8_t rx_index = 0;
@@ -146,7 +147,7 @@ void StartDefaultTask(void *argument)
   uint16_t pulse_x = 1500;
   uint16_t pulse_y = 1500;
 
-  const uint16_t step_size = 16;
+  const uint16_t step_size = 5;
 
   // ── 제어 상수 ────────────────────────────────────────────
   const float Kp_x      = 0.08f;
@@ -154,7 +155,7 @@ void StartDefaultTask(void *argument)
   const float Kd_x      = 0.25f;   // D항: 브레이크 강도
   const float Kd_y      = 0.25f;   // 진동 있으면 올리고, 굳으면 낮추기
   const int   max_speed = 15;
-  const int   deadzone  = 10;      // 서보 버징 방지
+  const int   deadzone  = 20;      // 서보 버징 방지
   const float max_pulse = 2300.0f;
   const float min_pulse =  700.0f;
   // ─────────────────────────────────────────────────────────
@@ -194,7 +195,7 @@ void StartDefaultTask(void *argument)
         }
     }
 
-    if(osMessageQueueGet(KeyQueueHandle, &rx_msg, NULL, 10) == osOK)
+    if(osMessageQueueGet(KeyQueueHandle, &rx_msg, NULL, 20) == osOK)
     {
         // ── 모드 전환 (TOGGLE 버튼) ──────────────────────────
         if(rx_msg.msg_type == TYPE_MANUAL && (rx_msg.manual_cmd & CMD_TOGGLE))
@@ -223,7 +224,6 @@ void StartDefaultTask(void *argument)
                 TIM3->CCR2 = pulse_y;
             }
         }
-
         // ── 자동 모드 (PD 제어) ───────────────────────────────
         else if(current_mode == TYPE_AUTO)
         {
@@ -240,6 +240,7 @@ void StartDefaultTask(void *argument)
                 // LED 락온 판정 (나중에 레이저 포인터로 변경 예정)
                 if(ex == 0.0f && ey == 0.0f)
                     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET);
+
                 else
                     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
 
@@ -274,17 +275,26 @@ void StartDefaultTask(void *argument)
             else
             {
                 // 물체 없음 → 중앙 대기 + 전체 리셋
-                pulse_x_f    = 1500.0f;
+/*                pulse_x_f    = 1500.0f;
                 pulse_y_f    = 1500.0f;
                 prev_error_x = 0.0f;
                 prev_error_y = 0.0f;
-                HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
+
 
                 TIM3->CCR1 = 1500;
-                TIM3->CCR2 = 1500;
+                TIM3->CCR2 = 1500;*/
+                HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
             }
         }
     }
+    else // timeout → 메시지 없음
+    {
+        if(current_mode == TYPE_AUTO)
+        {
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET); // LED OFF
+        }
+    }
+
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -338,6 +348,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if(huart->Instance == USART2)
     {
+
         HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
 
         if(rx_byte == '\n' || rx_byte == '\r')
@@ -358,5 +369,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
         HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
     }
+
 }
 /* USER CODE END Application */
