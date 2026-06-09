@@ -4,16 +4,6 @@
   * File Name          : freertos.c
   * Description        : Code for freertos applications
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 
@@ -61,25 +51,15 @@ typedef struct {
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
 extern TIM_HandleTypeDef htim3;
-extern UART_HandleTypeDef huart2;
 
-// UART 수신 버퍼
-
-uint8_t rx_byte;
-char    rx_buffer[30];
-uint8_t rx_index = 0;
-
-// ISR → Task 데이터 전달용 변수
-// ISR에서는 플래그만 세우고, sscanf는 MotorTask에서 처리
-volatile uint8_t uart_msg_ready = 0;   // 완성된 문장이 있으면 1
-char             uart_parse_buf[30];   // ISR이 복사해 둔 완성 문자열
+// [삭제 완료] UART 관련 수신 버퍼 및 플래그 변수 모두 제거되었습니다.
 /* USER CODE END Variables */
 
 /* Definitions for MotorTask */
 osThreadId_t MotorTaskHandle;
 const osThreadAttr_t MotorTask_attributes = {
   .name = "MotorTask",
-  .stack_size = 512 * 4,
+  .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for KeypadTask */
@@ -103,40 +83,20 @@ uint16_t Scan_Keypad(void);
 void StartDefaultTask(void *argument);
 void StartTask02(void *argument);
 
-void MX_FREERTOS_Init(void);
+void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
 void MX_FREERTOS_Init(void) {
-  /* USER CODE BEGIN Init */
+  /* Create the queue(s) */
+  KeyQueueHandle = osMessageQueueNew (8, sizeof(TurretMsg_t), &KeyQueue_attributes);
 
-  /* USER CODE END Init */
-
-  /* USER CODE BEGIN RTOS_MUTEX */
-  /* USER CODE END RTOS_MUTEX */
-
-  /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* USER CODE END RTOS_SEMAPHORES */
-
-  /* USER CODE BEGIN RTOS_TIMERS */
-  /* USER CODE END RTOS_TIMERS */
-
-  KeyQueueHandle = osMessageQueueNew(16, sizeof(TurretMsg_t), &KeyQueue_attributes);
-
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* USER CODE END RTOS_QUEUES */
-
-  MotorTaskHandle  = osThreadNew(StartDefaultTask, NULL, &MotorTask_attributes);
-  KeypadTaskHandle = osThreadNew(StartTask02,      NULL, &KeypadTask_attributes);
-
-  /* USER CODE BEGIN RTOS_THREADS */
-  /* USER CODE END RTOS_THREADS */
-
-  /* USER CODE BEGIN RTOS_EVENTS */
-  /* USER CODE END RTOS_EVENTS */
+  /* Create the thread(s) */
+  MotorTaskHandle = osThreadNew(StartDefaultTask, NULL, &MotorTask_attributes);
+  KeypadTaskHandle = osThreadNew(StartTask02, NULL, &KeypadTask_attributes);
 }
 
 /* USER CODE BEGIN Header_StartDefaultTask */
 /**
-  * @brief  MotorTask: 서보 제어 + UART 파싱 처리
+  * @brief  MotorTask: 서보 제어 및 메시지 큐 처리
   */
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
@@ -152,15 +112,14 @@ void StartDefaultTask(void *argument)
   // ── 제어 상수 ────────────────────────────────────────────
   const float Kp_x      = 0.08f;
   const float Kp_y      = 0.08f;
-  const float Kd_x      = 0.25f;   // D항: 브레이크 강도
-  const float Kd_y      = 0.25f;   // 진동 있으면 올리고, 굳으면 낮추기
+  const float Kd_x      = 0.25f;
+  const float Kd_y      = 0.25f;
   const int   max_speed = 15;
-  const int   deadzone  = 20;      // 서보 버징 방지
+  const int   deadzone  = 20;
   const float max_pulse = 2300.0f;
   const float min_pulse =  700.0f;
   // ─────────────────────────────────────────────────────────
 
-  // D항 계산용 이전 오차 + float 펄스 누적
   float prev_error_x = 0.0f;
   float prev_error_y = 0.0f;
   float pulse_x_f    = 1500.0f;
@@ -174,26 +133,13 @@ void StartDefaultTask(void *argument)
   TIM3->CCR1 = pulse_x;
   TIM3->CCR2 = pulse_y;
 
-  HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+  // [삭제 완료] HAL_UART_Receive_IT 호출문이 제거되었습니다.
 
   for(;;)
   {
-    // ── UART 파싱 (ISR에서 sscanf 금지 → 태스크에서 처리) ──
-    if(uart_msg_ready)
-    {
-        uart_msg_ready = 0;
-
-        int err_x = 0, err_y = 0;
-        if(sscanf(uart_parse_buf, "%d,%d", &err_x, &err_y) == 2)
-        {
-            TurretMsg_t tx_msg;
-            tx_msg.msg_type   = TYPE_AUTO;
-            tx_msg.manual_cmd = 0;
-            tx_msg.error_x    = (int16_t)err_x;
-            tx_msg.error_y    = (int16_t)err_y;
-            osMessageQueuePut(KeyQueueHandle, &tx_msg, 0, 0);
-        }
-    }
+    // [삭제 완료] 기존에 존재하던 uart_msg_ready 문자열 파싱 블록이 제거되었습니다.
+    // 앞으로는 CAN 수신 콜백 함수에서 hcan을 통해 받은 데이터를
+    // 바로 KeyQueueHandle에 넣어 제어하게 됩니다.
 
     if(osMessageQueueGet(KeyQueueHandle, &rx_msg, NULL, 20) == osOK)
     {
@@ -214,7 +160,6 @@ void StartDefaultTask(void *argument)
                 if(rx_msg.manual_cmd & CMD_UP)    pulse_y -= step_size;
                 if(rx_msg.manual_cmd & CMD_DOWN)  pulse_y += step_size;
 
-                // [FIX] 수동 소프트 리미트 + CCR 반영
                 if(pulse_x > (uint16_t)max_pulse) pulse_x = (uint16_t)max_pulse;
                 if(pulse_x < (uint16_t)min_pulse) pulse_x = (uint16_t)min_pulse;
                 if(pulse_y > (uint16_t)max_pulse) pulse_y = (uint16_t)max_pulse;
@@ -232,38 +177,29 @@ void StartDefaultTask(void *argument)
                 float ex = (float)rx_msg.error_x;
                 float ey = (float)rx_msg.error_y;
 
-                // [FIX 버그2/3] ex/ey 복사 후 데드존 처리 (중복 제거)
-                //              prev_error 비교도 데드존 적용된 값으로 일관성 유지
                 if(ex > -(float)deadzone && ex < (float)deadzone) ex = 0.0f;
                 if(ey > -(float)deadzone && ey < (float)deadzone) ey = 0.0f;
 
-                // LED 락온 판정 (나중에 레이저 포인터로 변경 예정)
                 if(ex == 0.0f && ey == 0.0f)
                     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET);
-
                 else
                     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
 
-                // ── PD 제어 ────────────────────────────────────
-                // P항: 오차에 비례 (멀수록 빠름)
-                // D항: 오차 변화율 (줄어드는 중이면 자동 감속 → 오버슈트 억제)
+                // ── PD 제어 ──
                 float delta_x = Kp_x * ex + Kd_x * (ex - prev_error_x);
                 float delta_y = Kp_y * ey + Kd_y * (ey - prev_error_y);
 
                 prev_error_x = ex;
                 prev_error_y = ey;
 
-                // 스피드 리미터
                 if(delta_x >  (float)max_speed) delta_x =  (float)max_speed;
                 if(delta_x < -(float)max_speed) delta_x = -(float)max_speed;
                 if(delta_y >  (float)max_speed) delta_y =  (float)max_speed;
                 if(delta_y < -(float)max_speed) delta_y = -(float)max_speed;
 
-                // float 누적
                 pulse_x_f += delta_x;
                 pulse_y_f -= delta_y;
 
-                // [FIX 버그1] 소프트 리미트를 pulse_x_f 기준으로 통일
                 if(pulse_x_f > max_pulse) pulse_x_f = max_pulse;
                 if(pulse_x_f < min_pulse) pulse_x_f = min_pulse;
                 if(pulse_y_f > max_pulse) pulse_y_f = max_pulse;
@@ -274,27 +210,17 @@ void StartDefaultTask(void *argument)
             }
             else
             {
-                // 물체 없음 → 중앙 대기 + 전체 리셋
-/*                pulse_x_f    = 1500.0f;
-                pulse_y_f    = 1500.0f;
-                prev_error_x = 0.0f;
-                prev_error_y = 0.0f;
-
-
-                TIM3->CCR1 = 1500;
-                TIM3->CCR2 = 1500;*/
                 HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
             }
         }
     }
-    else // timeout → 메시지 없음
+    else
     {
         if(current_mode == TYPE_AUTO)
         {
-            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET); // LED OFF
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
         }
     }
-
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -329,7 +255,6 @@ void StartTask02(void *argument)
         if(tx_msg.manual_cmd != 0)
             osMessageQueuePut(KeyQueueHandle, &tx_msg, 0, 0);
     }
-
     osDelay(30);
   }
   /* USER CODE END StartTask02 */
@@ -337,38 +262,5 @@ void StartTask02(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
-
-/**
-  * @brief UART 수신 완료 콜백 (ISR 컨텍스트)
-  *
-  * ISR에서는 버퍼에 글자를 쌓고, 문장이 완성되면 uart_parse_buf에 복사 후
-  * uart_msg_ready 플래그만 1로 세운다. 실제 sscanf 파싱은 MotorTask에서 수행.
-  */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if(huart->Instance == USART2)
-    {
-
-        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-
-        if(rx_byte == '\n' || rx_byte == '\r')
-        {
-            if(rx_index > 0)
-            {
-                rx_buffer[rx_index] = '\0';
-                memcpy(uart_parse_buf, rx_buffer, rx_index + 1);
-                uart_msg_ready = 1;
-                rx_index = 0;
-            }
-        }
-        else
-        {
-            if(rx_index < sizeof(rx_buffer) - 1)
-                rx_buffer[rx_index++] = rx_byte;
-        }
-
-        HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
-    }
-
-}
+// [삭제 완료] HAL_UART_RxCpltCallback 인터럽트 콜백 함수가 완전히 제거되었습니다.
 /* USER CODE END Application */

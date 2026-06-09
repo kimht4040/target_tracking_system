@@ -4,28 +4,18 @@
   * @file           : main.c
   * @brief          : Main program body
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "can.h"
 #include "tim.h"
-#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-// [FIX] cmsis_os.h 중복 include 제거
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,11 +49,22 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#define TYPE_MANUAL  0
+#define TYPE_AUTO    1
+
 #define CMD_UP     (1 << 0)
 #define CMD_DOWN   (1 << 1)
 #define CMD_LEFT   (1 << 2)
 #define CMD_RIGHT  (1 << 3)
 #define CMD_TOGGLE (1 << 4)
+
+// freertos.c와 동일한 구조체를 main.c에서도 알 수 있도록 선언
+typedef struct {
+    uint8_t  msg_type;
+    uint16_t manual_cmd;
+    int16_t  error_x;
+    int16_t  error_y;
+} TurretMsg_t;
 
 uint16_t Scan_Keypad(void)
 {
@@ -116,7 +117,6 @@ uint16_t Scan_Keypad(void)
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -140,19 +140,44 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM3_Init();
-  MX_USART2_UART_Init();
-  /* USER CODE BEGIN 2 */
+  MX_CAN1_Init();
 
+  /* USER CODE BEGIN 2 */
+  CAN_FilterTypeDef canFilterConfig;
+
+  // 모든 CAN ID 메시지를 수신하도록 마스크 필터 개방
+  canFilterConfig.FilterBank = 0;
+  canFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
+  canFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
+  canFilterConfig.FilterIdHigh = 0x0000;
+  canFilterConfig.FilterIdLow = 0x0000;
+  canFilterConfig.FilterMaskIdHigh = 0x0000;
+  canFilterConfig.FilterMaskIdLow = 0x0000;
+  canFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
+  canFilterConfig.FilterActivation = ENABLE;
+  canFilterConfig.SlaveStartFilterBank = 14;
+
+  if (HAL_CAN_ConfigFilter(&hcan1, &canFilterConfig) != HAL_OK) {
+      Error_Handler();
+  }
+
+  // CAN 컨트롤러 시작
+  if (HAL_CAN_Start(&hcan1) != HAL_OK) {
+      Error_Handler();
+  }
+
+  // RX0 인터럽트(수신 알림) 활성화
+  if (HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
+      Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Init scheduler */
-  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
+  osKernelInitialize();
   MX_FREERTOS_Init();
 
   /* Start scheduler */
   osKernelStart();
-
-  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -174,14 +199,9 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -197,8 +217,6 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -213,55 +231,55 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+/**
+  * @brief CAN 수신 인터럽트 콜백 함수
+  */
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+    CAN_RxHeaderTypeDef RxHeader;
+    uint8_t RxData[8];
+    TurretMsg_t rx_msg;
 
+    // FIFO0에서 메시지 읽기
+    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
+
+        /* * [수신 데이터 파싱]
+         * CAN 버스로부터 들어온 8바이트 배열(RxData)을 TurretMsg_t 구조체에 맞게 조립합니다.
+         */
+        rx_msg.msg_type   = RxData[0];
+        rx_msg.manual_cmd = (uint16_t)((RxData[2] << 8) | RxData[1]);
+        rx_msg.error_x    = (int16_t)((RxData[4] << 8) | RxData[3]);
+        rx_msg.error_y    = (int16_t)((RxData[6] << 8) | RxData[5]);
+
+        /*
+         * [FreeRTOS 큐 전송]
+         * 파싱 완료된 구조체를 KeyQueueHandle에 넣어 MotorTask가 처리하도록 합니다.
+         */
+        if (KeyQueueHandle != NULL) {
+            osMessageQueuePut(KeyQueueHandle, &rx_msg, 0, 0);
+        }
+    }
+}
 /* USER CODE END 4 */
 
-/**
-  * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM4 interrupt took place, inside
-  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
-  * a global variable "uwTick" used as application time base.
-  * @param  htim : TIM handle
-  * @retval None
-  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  /* USER CODE BEGIN Callback 0 */
-
-  /* USER CODE END Callback 0 */
   if (htim->Instance == TIM4)
   {
     HAL_IncTick();
   }
-  /* USER CODE BEGIN Callback 1 */
-
-  /* USER CODE END Callback 1 */
 }
 
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
