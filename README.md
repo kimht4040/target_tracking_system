@@ -1,88 +1,50 @@
-### 1. 역할 배분 (2인 팀 기준)
+# Auto-Tracking Pan-Tilt Turret System 
 
-시스템의 성격에 따라 '리눅스 호스트 및 비전/UI (Member A)'와 'STM32 펌웨어 및 하드웨어 제어 (Member B)'로 나누는 것이 가장 효율적입니다.
+## Overview
+웹캠을 통해 실시간으로 특정 객체(사람의 얼굴 또는 특정 색상의 사물)를 검출하고, 2축(Pan-Tilt) 서보모터를 구동하여 객체를 화면 중앙으로 정조준하는 자동 추적 터렛 시스템입니다. 
 
-**👤 Member A: 리눅스 시스템 & 어플리케이션 개발**
+비전 처리(Vision Processing)와 실시간 하드웨어 제어(Real-time Control) 노드를 분리하여 지연 시간(Latency)을 최소화하였으며, 수동 제어와 자동 추적 모드를 유연하게 전환할 수 있도록 설계되었습니다.
 
-- **담당 업무:**
-    
-    - **리눅스 UART 드라이버 개발:** 커널 수준 또는 유저 영역에서 STM32와 빠르고 안정적으로 통신할 수 있는 시리얼 드라이버 구축.
-        
-    - **OpenCV 표적 탐지:** 드론/비행기 객체 인식 알고리즘 구현 및 화면 중앙과의 오차값(Offset) 계산.
-        
-    - **Qt UI 개발:** 카메라 실시간 스트리밍 화면 출력, 표적 Bounding Box 표시, 수동 조작(Manual) 인터페이스 및 상태 모니터링 UI 구현.
-        
-- **주요 학습/연구:** Qt UI와 카메라 연동 최적화, 리눅스 디바이스 드라이버 구조 이해.
-    
+<br/>
 
-**👤 Member B: 임베디드 펌웨어 & 하드웨어 제어**
+## Tech Stack
+### Hardware
+* **MCU:** STM32 시리즈 (FreeRTOS 기반 실시간 제어)
+* **Vision Node:** Ubuntu 데스크톱 환경(얼굴 객체인식을 위해), 라즈베리파이4(공객체 인식)
+* **Actuator:** 2-Axis Pan-Tilt Servo Motors
+* **Communication:** CAN Transceiver (or USB to TTL)
 
-- **담당 업무:**
-    
-    - **FreeRTOS 환경 구축:** STM32에 RTOS를 올리고 UART 수신, CAN 송신, 모터 제어 태스크(Task) 분리 및 우선순위 할당.
-        
-    - **통신 인터페이스 구현 (HAL):** 호스트로부터 UART로 목표 좌표/제어 명령 수신, 서보 모터(또는 모터 드라이버)로 CAN 통신 신호 송신.
-        
-    - **하드웨어 제어:** 수신된 좌표 오차를 기반으로 2축 서보 모터 구동 로직 작성, 조준 완료 시 레이저 포인터 격발(GPIO 제어).
-        
-- **주요 학습/연구:** STM32 HAL 라이브러리 활용, CAN 프로토콜 기반 모터 제어, RTOS 큐(Queue) 및 인터럽트 처리.
-### 2. 프로젝트 구현 순서 (4주 완성)
+### Software & Languages
+* **Languages:** C, C++
+* **Vision Processing:** OpenCV (Haar Cascade, HSV Color Tracking)
+* **RTOS:** FreeRTOS (Task & Queue management)
+* **Protocol:** CAN (SocketCAN) / UART
 
-- **1주차 (5/18~5/24): 기반 학습 및 환경 세팅**
-    
-    - 공통: UART 패킷 구조(프로토콜) 정의 (예: STX, 조향각 X, 조향각 Y, 수동/자동 모드, 발사 여부, ETX, Checksum).
-        
-    - Mem A: 리눅스 환경 구성, OpenCV 기본 예제 구동, 커널/시리얼 통신 기초 학습.
-        
-    - Mem B: STM32CubeIDE(또는 CLion) 환경 세팅, FreeRTOS 태스크 생성, HAL 기반 LED/UART Loopback 테스트.
-        
-- **2주차 (5/25~5/31): 핵심 모듈 개발**
-    
-    - Mem A: 리눅스 UART 드라이버 작성 완료 및 테스트, Qt 기본 윈도우 띄우기 및 수동 조작 버튼 레이아웃 구성.
-        
-    - Mem B: 서보 모터 CAN 통신 제어 로직 구현, RTOS 상에서 UART 인터럽트로 명령을 받아 모터를 움직이는 뼈대 완성.
-        
-- **3주차 (6/1~6/7): 비전 통합 및 1차 시스템 연동**
-    
-    - Mem A: OpenCV 표적 탐지 로직을 Qt UI에 통합, 타겟과 화면 중앙 사이의 벡터(거리 및 방향) 추출 로직 완성.
-        
-    - Mem B: 레이저 포인터 제어 연동, 모터의 이동 속도 및 한계 각도(리밋) 설정.
-        
-    - 공통: 리눅스 호스트와 STM32 보드 간 연동 테스트 (Qt에서 버튼을 누를 때 모터가 정상 작동하는지 확인).
-        
-- **4주차 (6/8~6/18): 자동 추적 구현 및 최적화 (빠르고 정확하게)**
-    
-    - 공통: 영상에서 계산된 오차값을 실제 모터의 제어값으로 변환하는 로직 고도화.
-        
-    - **가장 중요한 단계:** 목표인 '빠르고 정확한 추적'을 위해 PID 제어(비례-적분-미분) 게인 값을 튜닝하여 덜덜거림(오버슈트)을 잡고 부드럽게 표적에 안착하도록 수정. 타겟이 중앙에 오면 레이저가 자동으로 켜지는 FSM(유한 상태 기계) 점검.
-        
+<br/>
 
----
+## Key Features
 
-### 3. 프로젝트 일정 간트 차트 (Markdown / Mermaid)
-```mermaid
-gantt
-    title 2축 레이저 추적 터렛 개발 일정
-    dateFormat  YYYY-MM-DD
-    axisFormat  %m/%d
-    
-    section 1. 설계 및 환경 구축
-    통신 프로토콜 정의 (공통)      :a1, 2026-05-18, 3d
-    STM32 & RTOS 기본 세팅 (B)  :a2, 2026-05-18, 5d
-    리눅스 개발 환경 & 기초 (A) :a3, 2026-05-18, 5d
-    
-    section 2. 핵심 드라이버 및 제어
-    리눅스 UART 드라이버 구현 (A):b1, 2026-05-23, 7d
-    서보 구동 CAN 통신 구현 (B) :b2, 2026-05-23, 5d
-    RTOS 기반 UART/모터 연동 (B) :b3, after b2, 5d
-    
-    section 3. 비전 및 UI 개발
-    OpenCV 표적 탐지 구현 (A)  :c1, 2026-05-28, 6d
-    Qt UI 및 카메라 연동 (A)     :c2, 2026-06-03, 5d
-    
-    section 4. 시스템 연동 및 최적화
-    1차 통합 통신 테스트 (공통)   :d1, 2026-06-06, 3d
-    자동 추적 제어 연동 (공통)    :d2, 2026-06-09, 4d
-    PID 튜닝 및 지연시간 최적화  :d3, 2026-06-13, 5d
-    최종 디버깅 및 시연 준비     :d4, 2026-06-18, 1d
-    
+### 1. 지능형 객체 추적 (Intelligent Object Tracking)
+* **AI & Color-based Detection:** OpenCV를 활용하여 노란색 공(HSV 필터링) 및 사람의 얼굴(Haar Cascade)을 실시간(60FPS)으로 검출합니다.
+* **Kalman Filter 적용:** 영상 노이즈나 일시적인 객체 가림 현상(Occlusion)이 발생하더라도 궤적을 예측하여 부드럽고 끊김 없는 추적을 보장합니다.
+
+### 2. 정밀한 실시간 모터 제어 (Precise Motor Control)
+* **PD 제어 알고리즘 (Proportional-Derivative Control):** 타겟 좌표와 현재 시야 중심 간의 오차(Error)를 계산하여 비례 제어로 이동 속도를 결정합니다. 목표 지점 도달 시 발생하는 오버슈트(Overshoot)와 잔떨림(Hunting)을 최소화하여 군용 터렛 수준의 묵직하고 정확한 제어를 구현했습니다.
+* **Deadzone 설정:** 중앙 좌표 부근의 미세한 픽셀 오차에 모터가 반응하지 않도록 데드존을 설정하여 기구적 안정성을 확보했습니다.
+
+### 3. 분산 아키텍처 기반 초고속 통신 (Offloading & Communication)
+* **연산 부하 분산:** 연산량이 많은 비전 처리는 Ubuntu PC에서 수행하고, 계산된 오차 좌표(dx, dy)만 STM32로 전송하는 오프로딩(Offloading) 구조를 채택했습니다.
+* **CAN / UART 통신:** 16비트 오차 데이터를 8바이트 패킷으로 패킹(Packing)하여 노이즈에 강한 CAN 통신(또는 UART)으로 지연 없이 MCU에 전달합니다.
+
+### 4. 수동/자동 상태 전환 및 메모리 기능 (Mode State Machine)
+* **Seamless Mode Switching:** 키패드 인터럽트(Interrupt)를 통해 즉각적으로 수동(Manual) 및 자동(Auto) 모드를 토글할 수 있습니다.
+* **Position Memory:** 모드 전환 시 현재의 Pan-Tilt 각도 위치를 기억(Save)하여, 수동 조작 후 다시 자동 모드로 복귀할 때 튀는 현상 없이 자연스럽게 동작을 이어나갑니다.
+
+### 5. 타겟 적중 피드백 (Target Hit Feedback)
+* **GPIO 제어:** 추적 중인 객체가 시야의 중앙(Deadzone 이내)에 완벽하게 록온(Lock-on)되면, STM32의 GPIO 핀을 제어하여 즉각적으로 LED를 점등시켜 사용자에게 시각적 타격 피드백을 제공합니다.
+
+<br/>
+
+## System Architecture (Brief)
+1. **[Vision Node - Ubuntu/C++]** 웹캠 영상 획득 → 객체 검출(OpenCV) → 중앙 픽셀과의 오차(dx, dy) 계산 → 데이터 패킹 및 CAN/UART 송신
+2. **[Control Node - STM32/FreeRTOS]** 통신 수신 인터럽트 → Message Queue로 데이터 전달 → PD 제어 알고리즘을 통한 PWM Duty Cycle 연산 → 2축 서보모터 구동 및 LED 제어
