@@ -13,72 +13,24 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
-#include <cstdint>
-#include <cstring>
-#include <cerrno>
+#include <fcntl.h>
+#include <termios.h>
 #include <unistd.h>
-#include <iostream>
-#include <string.h>
-#include <unistd.h>
-#include <net/if.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <linux/can.h>
-#include <linux/can/raw.h>
 
 static constexpr int CAM_W = 640; // USB 웹캠 속도 우선: 필요하면 640으로 복구
 static constexpr int CAM_H = 480; // USB 웹캠 속도 우선: 필요하면 480으로 복구
 static constexpr int CAM_FPS = 60;
 static constexpr int USB_CAMERA_INDEX = -1;      // USB 웹캠 번호: -1은 자동 검색, /dev/video1 고정이면 1
-static constexpr float PROCESS_SCALE = 0.4f;     // 노란 마스크 처리 배율: 낮추면 빠름, 너무 낮추면 검출력 감소
+static constexpr float PROCESS_SCALE = 0.5f;     // 노란 마스크 처리 배율: 낮추면 빠름, 너무 낮추면 검출력 감소
 static constexpr int DETECT_INTERVAL_FRAMES = 1; // 검출 주기: 1은 매 프레임, 2는 한 프레임 건너뛰며 속도 개선
-static constexpr int PRINT_INTERVAL_FRAMES = 5;  // 터미널 출력 주기: CAN 전송은 매 프레임 유지
-static constexpr float CAN_OUTPUT_SCALE = 1.0f;  // CAN 전송값 배율: 테스트 후 0.5f 등으로 조정
-static constexpr uint32_t CAN_TX_ID = 0x123;     // CAN 송신 ID
-static constexpr const char *CAN_IFACE = "can0";
+static constexpr int PRINT_INTERVAL_FRAMES = 10; // 터미널 출력 주기: UART 전송은 매 프레임 유지
+static constexpr float UART_OUTPUT_SCALE = 1.0f; // UART 전송값 배율: 테스트 후 0.5f 등으로 조정
 static constexpr double FPS_SMOOTHING = 0.90;    // 화면 FPS 표시 안정화 계수
 static constexpr bool SHOW_DEBUG_MASK = true;    // true로 바꾸면 노란색 검출 마스크 화면 표시
 static constexpr double MIN_RECT_AREA = 80.0;    // 너무 작은 노란 잡음 제거
 static constexpr double MIN_RECT_FILL = 0.45;    // 채움 비율: 낮추면 일부 가려진 공도 허용
 static const cv::Scalar YELLOW_LO(18, 120, 150); // RGB(235,192,72) ~= HSV(22,177,235)
 static const cv::Scalar YELLOW_HI(27, 255, 255);
-
-int openCAN(const char *ifname)
-{
-    int s;
-    struct sockaddr_can addr;
-    struct ifreq ifr;
-
-    // 1. CAN 소켓 생성
-    if ((s = socket(PF_CAN, SOCK_RAW, CAN_RAW)) < 0)
-    {
-        perror("[ERROR] CAN 소켓 생성 실패");
-        return -1;
-    }
-
-    // 2. 인터페이스(예: "can0") 인덱스 가져오기
-    strcpy(ifr.ifr_name, ifname);
-    if (ioctl(s, SIOCGIFINDEX, &ifr) < 0)
-    {
-        perror("[ERROR] CAN 인터페이스 인덱스 조회 실패");
-        close(s);
-        return -1;
-    }
-
-    // 3. 소켓 바인딩
-    memset(&addr, 0, sizeof(addr));
-    addr.can_family = AF_CAN;
-    addr.can_ifindex = ifr.ifr_ifindex;
-    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-    {
-        perror("[ERROR] CAN 바인딩 실패");
-        close(s);
-        return -1;
-    }
-
-    std::cout << "[INFO] CAN 인터페이스 열림: " << ifname << "\n";
-    return s;
-}
 
 // ── 칼만 필터 ────────────────────────────────
 // 상태 [cx, cy, vx, vy] / 측정 [cx, cy]
@@ -127,42 +79,29 @@ private:
     bool initialized_;
 };
 
-// ── CAN 전송 ────────────────────────────────
-// ── CAN 전송 ────────────────────────────────
-bool sendCanTarget(int canFd, float dx, float dy)
+// ── UART 설정 ────────────────────────────────
+int uartOpen(const char *dev, int baud)
 {
-    struct can_frame frame{};
-    frame.can_id = CAN_TX_ID; // 0x123 (STM32는 마스크 개방 상태라 어떤 ID든 받습니다)
-    frame.can_dlc = 8;        // 반드시 8바이트 전송
+    int fd = open(dev, O_RDWR | O_NOCTTY | O_NDELAY);
+    if (fd < 0)
+    {
+        perror("[UART] open 실패");
+        return -1;
+    }
 
-    int16_t sendDy = static_cast<int16_t>(dx * CAN_OUTPUT_SCALE);
-    int16_t sendDx = static_cast<int16_t>(dy * CAN_OUTPUT_SCALE);
-
-    // STM32의 TurretMsg_t 구조와 동일하게 바이트 배열 구성
-    // [0]   : msg_type (1 = TYPE_AUTO)
-    // [1-2] : manual_cmd (0)
-    // [3-4] : error_x (Little Endian)
-    // [5-6] : error_y (Little Endian)
-    // [7]   : padding (0)
-
-    frame.data[0] = 1; // TYPE_AUTO (자동 모드)
-
-    // manual_cmd는 0으로 채움
-    frame.data[1] = 0;
-    frame.data[2] = 0;
-
-    // error_x (하위, 상위 바이트 분리)
-    frame.data[3] = sendDx & 0xFF;
-    frame.data[4] = (sendDx >> 8) & 0xFF;
-
-    // error_y (하위, 상위 바이트 분리)
-    frame.data[5] = sendDy & 0xFF;
-    frame.data[6] = (sendDy >> 8) & 0xFF;
-
-    // 마지막 1바이트는 0으로 패딩
-    frame.data[7] = 0;
-
-    return write(canFd, &frame, sizeof(frame)) == static_cast<ssize_t>(sizeof(frame));
+    struct termios opt;
+    tcgetattr(fd, &opt);
+    cfsetispeed(&opt, baud);
+    cfsetospeed(&opt, baud);
+    opt.c_cflag = (opt.c_cflag & ~CSIZE) | CS8; // 8비트
+    opt.c_cflag |= CLOCAL | CREAD;
+    opt.c_cflag &= ~(PARENB | CSTOPB); // 패리티 없음, 스톱비트 1
+    opt.c_iflag = IGNPAR;
+    opt.c_oflag = 0;
+    opt.c_lflag = 0;
+    tcflush(fd, TCIFLUSH);
+    tcsetattr(fd, TCSANOW, &opt);
+    return fd;
 }
 
 void configureCamera(cv::VideoCapture &cap, int fourcc)
@@ -399,10 +338,10 @@ int main()
 
     cv::namedWindow("Tracking", cv::WINDOW_AUTOSIZE);
 
-    // CAN 초기화 (can0)
-    int canFd = openCAN(CAN_IFACE);
-    if (canFd < 0)
-        std::cerr << "[WARN] CAN 인터페이스를 열지 못해 전송 없이 계속 실행\n";
+    // UART 초기화 (/dev/ttyACM0, 115200bps)
+    int uartFd = uartOpen("/dev/ttyACM0", B115200);
+    if (uartFd < 0)
+        std::cerr << "[WARN] UART 없이 계속 실행\n";
 
     KalmanTracker kalman;
     cv::Mat frame;
@@ -477,11 +416,14 @@ int main()
                        detected ? "" : "  [PREDICT]");
             }
 
-            // CAN 전송: 2개의 int16 데이터를 8바이트 페이로드로 전송
-            if (canFd >= 0)
+            // UART 전송: "dx,dy\n" (정수형으로 변환하여 전송)
+            if (uartFd >= 0)
             {
-                if (!sendCanTarget(canFd, dx, dy))
-                    std::cerr << "[WARN] CAN 전송 실패 (" << errno << "): " << strerror(errno) << "\n";
+                char pkt[32];
+                int sendDy = (int)(dy * UART_OUTPUT_SCALE);
+                int sendDx = (int)(dx * UART_OUTPUT_SCALE);
+                int len = snprintf(pkt, sizeof(pkt), "%d,%d\n", sendDy, sendDx);
+                write(uartFd, pkt, len);
             }
         }
         else
@@ -520,8 +462,8 @@ int main()
     }
 
     grabber.stop();
-    if (canFd >= 0)
-        close(canFd);
+    if (uartFd >= 0)
+        close(uartFd);
     cap.release();
     cv::destroyAllWindows();
     return 0;
